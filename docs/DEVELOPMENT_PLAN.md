@@ -2,10 +2,11 @@
 
 **Package:** `mcp_a2a_proxy`
 **Target version:** 0.1.0
-**Status:** Planning — no code yet (`docs/` only)
+**Status:** Implementation in progress — scaffold and all eight tools exist; remaining
+unit-contract gaps, live integration and release certification are tracked in §8
 **Author:** Idea Bosque
 **License:** MIT
-**Date:** 2026-07-31
+**Last updated:** 2026-08-02
 
 ## 1. Purpose
 
@@ -66,7 +67,7 @@ The caller is an LLM agent working a task, not an operator administering the dae
 | In scope — a delegating agent | Out of scope — operator work |
 |---|---|
 | Find a peer agent that can do the job | Registering / editing / deleting agents |
-| Read a peer's capabilities before trusting it | Managing daemon settings |
+| Inspect peer registry signals and the daemon's protocol capabilities | Managing daemon settings |
 | Send it work and collect the result | Writing task / message rows directly |
 | Handle a peer that asks a follow-up question | Auditing another tenant's history |
 | Abandon work it no longer needs | Push-notification webhook configs |
@@ -86,6 +87,7 @@ mcp_a2a_proxy/
 │   ├── mcp_configuration.py   # MCP_CONFIGURATION: tools[] + module_links[]
 │   ├── mcp_a2a_proxy.py       # MCPA2AProxy facade (flat mixin composition)
 │   ├── a2a_client.py          # endpoint_id/part_id, JSON-RPC + GraphQL + REST calls
+│   ├── a2a_backed_processor.py # shared client access and host-facing properties
 │   ├── error_handler.py       # ErrorCode, handle_errors, build_error_response
 │   ├── discovery_mixin.py
 │   ├── delegation_mixin.py
@@ -189,7 +191,8 @@ in §7 — `ErrorCode`, `MCPError` subclasses, `handle_errors`, `build_error_res
 
 ### 3.1 JSON-RPC — `POST /{endpoint_id}/a2a` (primary)
 
-Five methods, from `a2a_daemon_engine/main.py:212-349`:
+Six methods, from `a2a_daemon_engine/main.py:212-349`; five cover delegation and task
+management, and one retrieves the optional authenticated daemon card:
 
 | Method | Purpose | Result |
 |---|---|---|
@@ -198,19 +201,21 @@ Five methods, from `a2a_daemon_engine/main.py:212-349`:
 | `tasks/get` | Status, result, history | SDK `Task` |
 | `tasks/list` | Find own in-flight work | SDK task page |
 | `tasks/cancel` | Abandon | SDK `Task` |
+| `agent/getAuthenticatedExtendedCard` | Read the authenticated daemon card | SDK agent card |
 
 The daemon accepts aliases for several of these; the proxy always sends the canonical
 name above. Non-JSON-RPC payloads are rejected (`main.py:154`); unknown methods return
 `-32601`.
 
-Unused: `tasks/pushNotificationConfig/*` (needs a public webhook the agent lacks),
-`tasks/resubscribe` (see §5.3), `agent/getAuthenticatedExtendedCard` (folded into
-`get_a2a_agent_card` behind a flag).
+Unused: `tasks/pushNotificationConfig/*` (needs a public webhook the agent lacks) and
+`tasks/resubscribe` (see §5.3). The extended-card method is exposed through
+`get_a2a_agent_card(extended=true)` rather than as a ninth MCP tool.
 
 ### 3.2 REST — `GET /{endpoint_id}/.well-known/agent-card.json`
 
-The capability document — skills, input/output modes, protocol version — an agent
-reads before delegating (`main.py:104-116`).
+The local daemon's capability document — skills, input/output modes and protocol
+version (`main.py:104-116`). It describes the daemon, not an individual registered
+peer, and is optional context rather than a required delegation step.
 
 ### 3.3 GraphQL — `POST /{endpoint_id}/a2a_core_graphql` (reads only)
 
@@ -261,8 +266,9 @@ choose to call `cancel_a2a_task` deliberately.
 
 ## 4.1 Tool API Contracts
 
-The tool schemas should be concrete enough that a model can form valid A2A payloads
-without knowing SDK internals.
+These schemas are the 0.1.0 public tool contract. They must remain synchronized with
+`MCP_CONFIGURATION` so a model can form valid A2A payloads without knowing SDK
+internals.
 
 ### `discover_a2a_agents`
 
@@ -314,8 +320,9 @@ artifacts and requested history. `input_required` is non-terminal.
 
 ### `list_a2a_tasks`
 
-Args: `page_size?`, `page_token?`, plus daemon-supported filters. This is the recovery
-tool after context loss or a stream timeout.
+Args: `page_size?`, `page_token?`, `status?`, `priority?`, `task_type?`, and
+`assigned_agent_id?`. The proxy maps the last two to protocol fields `type` and
+`assignedAgentId`. This is the recovery tool after context loss or a stream timeout.
 
 ### `cancel_a2a_task`
 
@@ -388,10 +395,10 @@ delegation would add a round-trip, duplicate resolution the daemon already perfo
 and create a second place where "which agent?" is decided.
 
 **Discovery and the agent card are optional aids, not pipeline stages.** A caller that
-already knows the id — from a prior turn, from configuration, from its own instructions
-— calls `send_a2a_message` and nothing else. `discover_a2a_agents` and
-`get_a2a_agent_card` exist only for the case where it does not know, and their
-descriptions say so rather than implying a required sequence.
+already knows the id — from a prior turn, configuration or its own instructions —
+calls `send_a2a_message` directly. `discover_a2a_agents` helps when the caller does not
+know the id. `get_a2a_agent_card` provides daemon-level protocol context; it does not
+identify or validate a peer.
 
 #### Why the proxy does not auto-select
 
@@ -428,7 +435,7 @@ and is not an independent A2A server — the reference registration sets
 `endpoint_url = http://127.0.0.1:8765`, our own gateway, so fetching its "card" returns
 our own.
 
-#### Open decision: should the proxy fetch a *remote* peer's card?
+#### Deferred decision: should the proxy fetch a *remote* peer's card?
 
 Fetching `{endpoint_url}/.well-known/agent-card.json` for a remote peer is the only
 place the proxy would talk to something other than its own daemon — it breaks the
@@ -452,7 +459,8 @@ alternative design — optional `agent_id`, fetch the peer's card when `endpoint
 points off-box, report "locally handled, no distinct card" otherwise — is recorded here
 so it can be picked up without re-deriving it.
 
-When a caller *does* need to find an id first, discovery is the peer-specific aid. The card is optional daemon-level context, not a peer capability lookup:
+When a caller *does* need to find an id first, discovery is the peer-specific aid.
+The card is optional daemon-level context, not a peer capability lookup:
 
 ```text
 discover_a2a_agents()              -> who exists (name, status, backend metadata)
@@ -620,14 +628,18 @@ Two backend responses need explicit mapping because they are not HTTP errors:
 
 ## 8. Phases
 
-| Phase | Deliverable | Exit criteria |
-|---|---|---|
-| **P0 — Scaffold** | `pyproject.toml` (`pyhumps`, `httpx[http2]`, `silvaengine-utility`), `__init__.py`, `error_handler.py` ported from hospirfq, base class with `endpoint_id` / `part_id` | `pip install -e .[dev]`; `compileall` clean |
-| **P1 — Client** | `a2a_client.py` — auth, JSON-RPC, GraphQL documents, REST | `httpx.MockTransport` tests: JWT issue, proactive refresh, reactive 401 retry, `x-api-key` fallback, `Part-Id` sent, `Part-Id` dropped when `part_id is None`, endpoint_id path quoting, secret redaction, malformed/non-JSON responses, HTTP timeout → `STREAM_TIMEOUT`, GraphQL `errors`, JSON-RPC error mapping |
-| **P2 — Tools** | `discovery_mixin.py`, `delegation_mixin.py`, `task_mixin.py` (8 tools) | Tests mock the client call (as hospirfq mocks `_execute_graphql_query`); canonical JSON-RPC method names asserted; `validate_not_empty` on required args; tool schemas match §4.1; empty results return a sentence not an error; capability JSON parse failure falls back to raw string; responses decamelized but A2A request field names sent verbatim |
-| **P3 — Facade + config** | `mcp_a2a_proxy.py`, `mcp_configuration.py` | Reconciliation: 8 unique tool names, 8 unique links, bijection, every `function_name` resolves via `getattr`, `endpoint_id` / `part_id` both present on the facade |
-| **P4 — Live integration** | `tests/run_integration.py`, `docs/integration_scenarios_sop.md` | §9 scenarios pass against the running gateway |
-| **P5 — Docs + release** | `README.md`, version pin, certification report under `docs/test_results/` | Report committed |
+Current snapshot (verified 2026-08-02): the package, eight tool definitions and 59 unit
+tests are present, and the unit suite passes. That evidence does not close phase gates
+whose listed assertions or live artifacts are still missing.
+
+| Phase | Status | Deliverable | Exit criteria |
+|---|---|---|---|
+| **P0 — Scaffold** | **Complete** | `pyproject.toml` (`pyhumps`, `httpx[http2]`, `silvaengine-utility`), `__init__.py`, `error_handler.py`, `a2a_backed_processor.py` with `endpoint_id` / `part_id` | `pip install -e .[dev]`; `compileall` clean |
+| **P1 — Client** | **In progress** | `a2a_client.py` — auth, JSON-RPC, GraphQL documents, REST | `httpx.MockTransport` tests must cover token issuance, proactive refresh, reactive 401 retry, `x-api-key` fallback, optional `Part-Id`, endpoint quoting, secret redaction, malformed responses, stream timeout → `STREAM_TIMEOUT`, non-stream timeout → `API_CONNECTION_FAILED`, GraphQL `errors`, and JSON-RPC error mapping. **Gap:** add explicit token-issuance and proactive-refresh assertions. |
+| **P2 — Tools** | **In progress** | `discovery_mixin.py`, `delegation_mixin.py`, `task_mixin.py` (8 tools) | Tests must assert canonical methods, required arguments, §4.1 schemas, empty-result sentences, capability parsing, decamelized responses and verbatim A2A request fields. **Gap:** make `message.role`, `message.parts[]`, and each part's `kind` structural schema requirements, then test invalid payload rejection. |
+| **P3 — Facade + config** | **Complete** | `mcp_a2a_proxy.py`, `mcp_configuration.py` | Reconciliation proves 8 unique tools, 8 unique links, a tool/link bijection, resolvable `function_name` values, and both host properties on the facade. |
+| **P4 — Live integration** | **Pending** | `mcp_a2a_proxy/tests/run_integration.py`, `docs/integration_scenarios_sop.md` | §9 passes against the running gateway and required peers on both persistence backends; failures retain enough sanitized evidence to diagnose. |
+| **P5 — Docs + release** | **In progress** | `README.md`, version pin, certification report under `docs/test_results/` | README and version agree with the shipped API; all P4 gates pass; UTF-8/mojibake scan is clean; the report records tested component versions, backends, scenarios, known limitations and release decision. **Gap:** normalize corrupted punctuation currently present in Python docstrings and tool descriptions. |
 
 ## 9. Live Integration Scenarios (P4)
 
@@ -637,7 +649,8 @@ Run scenarios 1–4 against **both** deployed peers (Hermes and OpenClaw); run s
 against **Hermes**, the confirmed `INPUT_REQUIRED` producer (§12 Q1).
 
 1. **Discovery** — `discover_a2a_agents` returns registered peers; `status` filter
-   works; `capabilities` arrives as a parsed **list**, not a JSON string (§5.1); a
+   works; populated `capabilities` arrives as a parsed **list**, while NULL remains
+   absent rather than becoming an empty list (§5.1); a
    wrong `part_id` returns nothing (tenant isolation holds).
 2. **Capability read** — `get_a2a_agent_card()` returns this daemon's card with protocol
    version `1.0.0` and a gateway-substituted endpoint URL; `extended=true` respects auth
@@ -680,7 +693,7 @@ RLS context per call in PostgreSQL mode (`main.py:133-139`, `151-152`).
 | Model trusts empty registry `capabilities` and concludes a peer can do nothing | Description states the field is often unpopulated and that absence ≠ incapable; P4 scenario 1 asserts NULL surfaces as absent, not `[]`-meaning-none |
 | Model mistakes this daemon's own card for a peer's capability document (§5.1) | `get_a2a_agent_card` is explicit that it returns only this daemon's card and accepts no `agent_id` in 0.1.0 |
 | Capability data is too thin for the model to choose well | Known limitation, not a module bug — the fix is populating `capabilities` at registration (§5.1a ops recommendation); until then `agent_name` + backend metadata carry selection |
-| Model delegates to an unsuitable peer without reading the card | Selection is deliberately the caller's (§5.1a); `send_a2a_message` description names the discover → card → delegate flow, and `agent_id` may be omitted to use the daemon default |
+| Model delegates to an unsuitable peer using weak registry signals | Selection is deliberately the caller's (§5.1a); discovery exposes the available registry evidence, descriptions warn that missing capabilities do not mean incapability, and `agent_id` may be omitted to use the daemon default |
 
 ## 11. Out of Scope
 

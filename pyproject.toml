@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcp_a2a_proxy"
+version = "0.1.0"
+description = "MCP-to-A2A adapter: lets a tool-calling agent act as an A2A client via the SilvaEngine gateway"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "Idea Bosque"},
+]
+requires-python = ">=3.11"
+dependencies = [
+    # pyhumps installs the importable ``humps`` module that provides
+    # ``decamelize``. The unrelated ``humps`` PyPI package does NOT, which
+    # causes: module 'humps' has no attribute 'decamelize'.
+    "pyhumps>=3.8",
+    "httpx[http2]>=0.25",
+    "silvaengine-utility",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+]
+
+[tool.setuptools.packages.find]
+include = ["mcp_a2a_proxy*"]
+
+[tool.pytest.ini_options]
+testpaths = ["mcp_a2a_proxy/tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "--strict-markers --tb=short"
+markers = [
+    "unit: tests that do not require external services",
+    "integration: tests that exercise external service integration",
+    "slow: tests that take significant time to run",
+]
