@@ -114,6 +114,60 @@ def check_agent(proxy: Any, agent_id: str, expected_word: str,
     return all_ok
 
 
+def check_agent_stream(proxy: Any, agent_id: str, expected_word: str,
+                       prompt: Optional[str] = None) -> bool:
+    """Streaming variant: delegate via send_a2a_message_stream and assert
+    streaming_complete + ordered events + the expected word in the final
+    event text. MCP tool functions only (no direct backend calls)."""
+    prompt = prompt or (
+        f"Streaming health check: reply with exactly the word "
+        f"{expected_word} and nothing else.")
+    print(f"\n{'─' * 66}")
+    print(f"agent_id: {agent_id} | expected: {expected_word!r} | mode: stream")
+    print(f"{'─' * 66}")
+
+    print(f"1. send_a2a_message_stream(agent_id={agent_id}):")
+    out = proxy.send_a2a_message_stream(
+        **{"message": {"role": "user",
+                       "parts": [{"kind": "text", "text": prompt}]},
+           "agent_id": agent_id})
+    if _is_error(out):
+        print(f"   FAILED: {json.dumps(out, default=str)[:200]}")
+        return False
+
+    status = out.get("status") if isinstance(out, dict) else None
+    events = out.get("events") or [] if isinstance(out, dict) else []
+    events_emitted = out.get("events_emitted") if isinstance(out, dict) else None
+
+    # Last event carrying agent text — the final reply.
+    final_text = ""
+    for e in reversed(events):
+        if isinstance(e, dict):
+            for part in e.get("parts") or []:
+                if isinstance(part, dict) and part.get("text"):
+                    final_text = str(part["text"])
+                    break
+        if final_text:
+            break
+
+    print(f"   status        : {status}")
+    print(f"   events_emitted: {events_emitted}")
+    print(f"   final text    : {final_text[:80]!r}")
+
+    checks = [
+        ("status == streaming_complete", status == "streaming_complete"),
+        ("events_emitted > 0", bool(events_emitted) and events_emitted > 0),
+        ("events list present", isinstance(events, list) and len(events) > 0),
+        ("final event text contains expected word",
+         expected_word.lower() in final_text.lower()),
+    ]
+    all_ok = True
+    for label, ok in checks:
+        print(f"   [{'PASS' if ok else 'FAIL'}] {label}")
+        all_ok = all_ok and ok
+    return all_ok
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--agent", default="hermes-agent",
@@ -122,6 +176,9 @@ def main() -> int:
                         help="expected reply word (default: PONG)")
     parser.add_argument("--prompt", default=None,
                         help="custom prompt (overrides the default template)")
+    parser.add_argument("--stream", action="store_true",
+                        help="use send_a2a_message_stream instead of "
+                             "send_a2a_message")
     parser.add_argument("--list", action="store_true",
                         help="list registered active agents and exit")
     parser.add_argument("--all", action="store_true",
@@ -150,8 +207,12 @@ def main() -> int:
         results: Dict[str, bool] = {}
         for a in agents:
             agent_id = a.get("agent_id")
-            results[agent_id] = check_agent(proxy, agent_id, args.word,
-                                            args.prompt)
+            if args.stream:
+                results[agent_id] = check_agent_stream(proxy, agent_id,
+                                                       args.word, args.prompt)
+            else:
+                results[agent_id] = check_agent(proxy, agent_id, args.word,
+                                                args.prompt)
         print("\n" + "=" * 66)
         print("SUMMARY:")
         all_ok = True
@@ -164,7 +225,10 @@ def main() -> int:
               "FAIL — one or more agents failed")
         return 0 if all_ok else 1
 
-    ok = check_agent(proxy, args.agent, args.word, args.prompt)
+    if args.stream:
+        ok = check_agent_stream(proxy, args.agent, args.word, args.prompt)
+    else:
+        ok = check_agent(proxy, args.agent, args.word, args.prompt)
     print("\nVERDICT:",
           f"PASS — {args.agent} answered correctly through "
           "mcp_a2a_proxy -> a2a_daemon_engine" if ok
