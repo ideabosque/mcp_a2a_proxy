@@ -219,3 +219,4 @@ __marimo__/
 
 # Test results / certification evidence are local artifacts — never checked in.
 test_results/
+results/
