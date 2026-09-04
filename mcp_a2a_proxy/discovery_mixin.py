@@ -19,6 +19,7 @@ from __future__ import annotations
 __author__ = "Idea Bosque"
 
 import json
+import re
 from typing import Any, Dict
 
 import humps
@@ -55,6 +56,47 @@ def _parse_capabilities(data: Any) -> Any:
             _parse_capabilities(item)
         return data
     return data
+
+
+# Keys inside registry ``metadata`` that carry credentialed values (DEF-001).
+# The daemon returns agent metadata verbatim; the proxy is the surface handing
+# it to the calling model, so credential-shaped values are redacted here
+# (presence preserved — the model still sees that a key exists).
+_SENSITIVE_METADATA_KEY = re.compile(
+    r"(api_key|apikey|secret|password|token)", re.IGNORECASE
+)
+_REDACTED_SUFFIX_LENGTH = 4
+
+
+def _redact_metadata(value: Any) -> Any:
+    """Recursively redact credential-shaped values in agent metadata (DEF-001).
+
+    Registry metadata carries per-agent handler configuration which can
+    include secrets (``hermes_api_key``, ``openclaw_api_key``,
+    ``core_engine_token``, ...). The calling model has no business reading
+    them; any key matching the sensitive pattern has its value replaced with a
+    short ``…<last-4>`` marker. Non-string scalars are fully redacted.
+    """
+    if isinstance(value, dict):
+        redacted: Dict[str, Any] = {}
+        for key, item in value.items():
+            if _SENSITIVE_METADATA_KEY.search(str(key)):
+                redacted[key] = _redact_sensitive_value(item)
+            else:
+                redacted[key] = _redact_metadata(item)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_metadata(item) for item in value]
+    return value
+
+
+def _redact_sensitive_value(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, float)):
+        return "[REDACTED]"
+    text = str(value)
+    if len(text) <= _REDACTED_SUFFIX_LENGTH:
+        return "[REDACTED]"
+    return f"[REDACTED]…{text[-_REDACTED_SUFFIX_LENGTH:]}"
 
 
 class DiscoveryMixin(A2ABackedProcessor):
@@ -94,9 +136,13 @@ class DiscoveryMixin(A2ABackedProcessor):
         if is_empty_result(data.get("a2a_agent_list")):
             return "No A2A agents found matching this query."
 
-        # Parse capabilities JSON strings → lists (§5.1).
+        # Parse capabilities JSON strings → lists (§5.1), then redact
+        # credential-shaped metadata values (DEF-001).
         agents = data.get("a2a_agent_list", [])
         _parse_capabilities(agents)
+        for agent in agents:
+            if isinstance(agent, dict) and agent.get("metadata"):
+                agent["metadata"] = _redact_metadata(agent["metadata"])
         return data
 
     @handle_errors(operation_name="get_a2a_agent")
@@ -124,8 +170,11 @@ class DiscoveryMixin(A2ABackedProcessor):
         if is_empty_result(data):
             return f"No A2A agent found with agent_id '{agent_id}'."
 
-        # Parse capabilities JSON string → list (§5.1).
+        # Parse capabilities JSON string → list (§5.1), redact credential
+        # metadata (DEF-001).
         _parse_capabilities(data)
+        if isinstance(data, dict) and data.get("metadata"):
+            data["metadata"] = _redact_metadata(data["metadata"])
         return data
 
     @handle_errors(operation_name="get_a2a_agent_card")

@@ -249,8 +249,11 @@ class A2AGraphQLModule:
 # ==================== Client ====================
 
 
-# JSON-RPC error code → ErrorCode mapping (§4, §7).
+# JSON-RPC error code → ErrorCode mapping (§4, §7). -32001 is the A2A v1.0
+# task-not-found code emitted by a2a_daemon_engine for unknown task ids
+# (DEF-003 fix upstream, 2026-09-03).
 _JSONRPC_ERROR_MAP = {
+    -32001: ErrorCode.TASK_NOT_FOUND,
     -32601: ErrorCode.A2A_METHOD_NOT_FOUND,
     -32602: ErrorCode.A2A_INVALID_PARAMS,
     -32603: ErrorCode.A2A_INTERNAL_ERROR,

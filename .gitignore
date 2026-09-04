@@ -216,4 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Test results / certification evidence are local artifacts — never checked in.
 test_results/

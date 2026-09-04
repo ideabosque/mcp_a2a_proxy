@@ -386,9 +386,11 @@ send_a2a_message(message=…)                            -> daemon's default age
 ```
 
 Both cases are already handled one layer down: `resolve_agent` does
-`agent_id = agent_uuid or _default_agent_uuid()` (`a2a_ai_agent_utility.py:114-135`),
-and an unknown id comes back as `"Agent not found: {id}"`
-(`a2a_ai_agent_utility.py:803-807`), which maps to `AGENT_NOT_FOUND`.
+`agent_id = agent_uuid or _default_agent_uuid()`
+(`a2a_ai_agent_utility.py:166`), and an unknown id comes back as
+`"Agent not found: {id}"`
+(`a2a_ai_agent_utility.py:846`, line drifts with edits), which maps to
+`AGENT_NOT_FOUND`.
 
 So the proxy **must not** pre-flight the agent id. A validating lookup before every
 delegation would add a round-trip, duplicate resolution the daemon already performs,
@@ -517,8 +519,10 @@ no way to stop a peer burning tokens.
 ### 5.4 Multi-turn (`INPUT_REQUIRED`)
 
 A peer can pause mid-task to ask for input or human approval — actively used by the
-Hermes approval flow (`a2a_ai_agent_utility.py:1026-1029`,
-`a2a_server.py:470-475`). No extra tool is needed; the loop composes:
+Hermes approval flow (`a2a_ai_agent_utility.py:962-983` post-Phase-13, where any
+handler's `approval` chunk maps to `INPUT_REQUIRED` and `auth_required` maps to
+`AUTH_REQUIRED`; skill tags in `a2a_server.py:470-475`). No extra tool is needed; the
+loop composes:
 
 ```text
 send_a2a_message(message, agent_id)          -> task_id, state = input_required
@@ -709,25 +713,40 @@ RLS context per call in PostgreSQL mode (`main.py:133-139`, `151-152`).
 
 ### Q1 — Which peers will be delegated to?
 
-**Hermes and OpenClaw**, each with its own deployed gateway, plus the in-house
-core-engine bridge:
+**Hermes** (daemon-registered handler, per the P4 owner decision 2026-08-30) and the
+in-house core-engine bridge; OpenClaw is out of scope for the 0.1.0 P4 run (SOP
+v0.3.x). Handler modules were **renamed in `a2a_daemon_engine` on 2026-09-02**
+(commit `6bdad9a` — the `a2a_` prefix was dropped from handler filenames):
 
-| Peer | Handler | Deployment |
-|---|---|---|
-| Hermes Agent | `a2a_hermes_handler.HermesAgentHandler` | `docker-a2a-hermes-agent-gateway` |
-| OpenClaw | `a2a_openclaw_handler` | `docker-a2a-openclaw-gateway` |
-| `ai_agent_core_engine` | `a2a_core_engine_handler` | in-house bridge |
+| Peer | Handler (current) | Handler (pre-rename, historical) | Deployment |
+|---|---|---|---|
+| Hermes Agent | `hermes_handler.HermesAgentHandler` | `a2a_hermes_handler.HermesAgentHandler` | daemon-registered (was `docker-a2a-hermes-agent-gateway`) |
+| OpenClaw | `openclaw_handler.OpenClawAgentHandler` | `a2a_openclaw_handler.OpenClawAgentHandler` | `docker-a2a-openclaw-gateway` |
+| `ai_agent_core_engine` | `core_engine_handler.CoreEngineAgentHandler` | `a2a_core_engine_handler.CoreEngineAgentHandler` | in-house bridge |
+| *(new)* A2A-compliant backend | `a2a_proxy_handler.A2AProxyHandler` | — | any A2A backend (Phase 14, `agent_type: a2a_proxy`) |
 
-Which handler runs is decided by registry `metadata` (`module_name` / `class_name`), so
-the proxy needs no peer-specific code. That metadata is ops configuration, not a
-semantic capability — which is part of why capability-based auto-selection is left to
-the calling agent rather than built into the proxy (§5.1a).
+Since Phase 12 (`agent_type` shorthand, commit `01d2505`), handler resolution
+prefers **explicit `metadata.module_name`/`class_name`** first and falls back to
+the `agent_type` shorthand mapped through `AGENT_TYPE_MAP`
+(`a2a_ai_agent_utility.py:289-313`). Note for ops: registry rows that still
+carry the pre-rename `module_name` (e.g. `openclaw-agent` in the test partition)
+bypass the map and would fail handler import — re-register or clear
+`module_name`/`class_name` and set `agent_type` instead. The proxy needs no
+peer-specific code either way: it addresses peers by `agent_id` only.
 
-**Suggested P4 plan:** run discovery and delegation (scenarios 1–4) against **both**
-Hermes and OpenClaw, since they are separately deployed and could diverge. Run the
-multi-turn scenario (5) against **Hermes specifically** — it is the confirmed
-`INPUT_REQUIRED` / human-approval producer (`a2a_ai_agent_utility.py:1026-1029`), and
-its gateway is the one that exercises the HITL path end to end.
+**Phase 13–14 note (daemon, 2026-09-02):** the extended agent card is now a
+real authenticated document (auth-gated, not a verbatim card copy), push
+configs are durable, and a new `agent_type: a2a_proxy` handler forwards
+requests to any A2A-compliant backend (Hermes :9900, LangChain, CrewAI, ADK)
+without protocol translation — a peer the proxy can delegate to like any
+other.
+
+**Suggested P4 plan:** run discovery and delegation (scenarios 1–4) against the
+daemon-registered Hermes and the core-engine bridge (owner-confirmed
+2026-08-30; OpenClaw deferred). Run the multi-turn scenario (5) against
+**Hermes specifically** — it is the confirmed
+`INPUT_REQUIRED` / human-approval producer, and the only peer that exercises
+the HITL path end to end.
 
 ### Q2 — How long do real peer tasks run?
 
